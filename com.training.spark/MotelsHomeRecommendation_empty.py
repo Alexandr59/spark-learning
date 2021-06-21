@@ -1,44 +1,60 @@
 import findspark
 import sys
+from constants import *
 
 findspark.init()
 
 from pyspark.sql import DataFrame
 from pyspark.sql import SparkSession
-import pyspark.sql.functions as func
+from pyspark.sql.functions import *
+from pyspark.sql.types import *
 
 ERRONEOUS_DIR = "erroneous"
 AGGREGATED_DIR = "aggregated"
 
 
 def get_raw_bids(session: SparkSession, bids_path: str) -> DataFrame:
-    # TODO
-    pass
+    schema = StructType([StructField(col_name, StringType(), True) for col_name in BIDS_HEADER[:3]])
+    for i in BIDS_HEADER[3:]:
+        schema.fields.append(StructField(i, DecimalType(5, 3), True))
+    return session.read.schema(schema).csv(bids_path)
 
 
 def get_erroneous_records(bids: DataFrame) -> DataFrame:
-    # TODO
-    pass
+    bids = bids.filter(bids.HU.rlike("ERROR_(.*)")) \
+        .select(BIDS_HEADER[1], BIDS_HEADER[2]) \
+        .withColumnRenamed(BIDS_HEADER[2], 'errorMessage') \
+        .withColumnRenamed(BIDS_HEADER[1], 'hour')
+    bids = bids.withColumn('hour', to_timestamp(col('hour'), 'HH-dd-MM-yyyy'))
+    bids = bids.withColumn('hour', hour(col('hour')))
+    return bids.groupby('hour', 'errorMessage').count()
 
 
 def get_exchange_rates(session: SparkSession, path: str) -> DataFrame:
-    # TODO
-    pass
+    schema = StructType([StructField(col_name, StringType(), True) for col_name in EXCHANGE_RATES_HEADER[:-1]])
+    schema.fields.append(StructField(EXCHANGE_RATES_HEADER[3], DecimalType(5, 3), True))
+    return session.read.schema(schema).csv(path).select(EXCHANGE_RATES_HEADER[0], EXCHANGE_RATES_HEADER[3])
 
 
 def get_bids(bids: DataFrame, rates: DataFrame) -> DataFrame:
-    # TODO
-    pass
+    bids = bids.select(*BIDS_HEADER[:2], *TARGET_LOSAS)
+    bids = bids.dropna()
+    bids = bids.join(rates, bids[BIDS_HEADER[1]] == rates[EXCHANGE_RATES_HEADER[0]])
+    for country in TARGET_LOSAS:
+        bids = bids.withColumn(country, (col(country) * col(EXCHANGE_RATES_HEADER[3])).cast(DecimalType(5, 3)))
+    bids = bids.withColumn(BIDS_HEADER[1], to_timestamp(col(BIDS_HEADER[1]), 'HH-dd-MM-yyyy'))
+    return bids.select(*BIDS_HEADER[:2], expr("stack(3, 'US', US, 'CA', CA, 'MX', MX) as (Losa,Price)"))
 
 
 def get_motels(session: SparkSession, path: str) -> DataFrame:
-    # TODO
-    pass
+    schema = StructType([StructField(col_name, StringType(), True) for col_name in MOTELS_HEADER])
+    return session.read.schema(schema).csv(path).select(MOTELS_HEADER[:2])
 
 
 def get_enriched(bibs: DataFrame, motel: DataFrame) -> DataFrame:
-    # TODO
-    pass
+    bibs = bibs.join(motel, BIDS_HEADER[0])
+    return bibs.groupby(BIDS_HEADER[0], BIDS_HEADER[1]).agg(max('Price').alias('Price')) \
+        .join(bibs, [*BIDS_HEADER[0:2], 'Price'])
 
 
 def process_data(session: SparkSession, bids_path: str, motels_path: str, exchange_rates_path: str,
@@ -95,6 +111,7 @@ def process_data(session: SparkSession, bids_path: str, motels_path: str, exchan
     """
 
     enriched = get_enriched(bids, motels)
+
     enriched.coalesce(1) \
         .write.csv(output_base_path + "/" + AGGREGATED_DIR)
 
